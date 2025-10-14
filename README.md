@@ -1,31 +1,32 @@
-## Periodic Timer using Boost.Asio for C++ - PeriodicExecutor
+# Periodic Timer using Boost.Asio for C++ - PeriodicExecutor
 
 The `PeriodicExecutor` is a C++ class that implements an accurate, asynchronous periodic function scheduler using the **Boost.Asio** library. This implementation adheres to best practices by employing the anti-drift pattern and providing explicit control over the timer's lifecycle (Start, Stop, Pause/Resume).
 
 ## Features
 
-  * **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to ensure intervals are consistent and prevent cumulative timing errors, regardless of handler execution time.
-  * **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, ensuring the timer is non-blocking and efficient.
-  * **Explicit Control:** Provides public methods (`start()`, `stop()`, and `pause_resume()`) for managing the periodic task externally.
-  * **Graceful Shutdown:** Utilizes the timer's `cancel()` function and checks for the `boost::asio::error::operation_aborted` status to ensure clean termination.
+* **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to ensure intervals are consistent and prevent cumulative timing errors, regardless of handler execution time.
+* **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, ensuring the timer is non-blocking and efficient.
+* **Explicit Control:** Provides public methods (`start()`, `stop()`, and `pause_resume()`) for managing the periodic task externally.
+* **Graceful Shutdown:** Utilizes the timer's `cancel()` function and checks for the `boost::asio::error::operation_aborted` status to ensure clean termination.
 
 ## Dependencies
 
-  * **Boost:** Specifically, the **Boost.Asio** library.
-  * **C++ Standard Library:** Requires C++11 or later for `std::chrono` and `std::thread`.
+* **Boost:** Specifically, the **Boost.Asio** library.
+* **C++ Standard Library:** Requires C++11 or later for `std::chrono` and `std::thread`.
 
 ## Implementation Details
 
 The core functionality of the `PeriodicExecutor` is based on three Boost.Asio principles:
 
-1.  **`io_context`:** The timer's work is dispatched by the `io_context`. The execution only begins when a thread calls `io_context.run()`.
-2.  **State Management:** The internal `is_running_` and `is_paused_` flags, protected by `std::atomic`, are used in conjunction with `timer_.cancel()` to manage the external control operations.
-3.  **Control Flow:**
+1. **`io_context`:** The timer's work is dispatched by the `io_context`. The execution only begins when a thread calls `io_context.run()`.
+2. **State Management:** The internal `is_running_` and `is_paused_` flags, protected by `std::atomic`, are used in conjunction with `timer_.cancel()` to manage the external control operations.
+3. **Control Flow:**
       * **Stop/Pause:** Calling `stop()` or `pause()` issues `timer_.cancel()`. The periodic `handler` detects the resulting `operation_aborted` error code.
       * If `stop()` was called, the handler sees the cancellation and does *not* reschedule, allowing the `io_context::run()` to return.
       * If `pause()` was called, the handler sees the cancellation and checks the `is_paused_` flag, which also prevents rescheduling until `resume` is called.
 
 ## Build Instructions
+
 ```bash
 git clone https://github.com/JoergWall/PeriodicExecutor.git
 cd PeriodicExecutor
@@ -35,10 +36,9 @@ make
 
 ```
 
-
 ## Usage Example
 
-The following code demonstrates the class structure and its use with external control threads to simulate real-world application scenarios.
+The following code demonstrates the periodic execution of functions in different timing intervals:
 
 ```cpp
 #include "PeriodicExecutor.hpp"
