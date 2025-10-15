@@ -1,18 +1,32 @@
-# Periodic Timer using Boost.Asio for C++ - PeriodicExecutor
+# PeriodicExecutor - Periodic Timer using Boost.Asio for C++
 
-The `PeriodicExecutor` is a C++ class that implements an accurate, asynchronous periodic function scheduler using the **Boost.Asio** library. This implementation adheres to best practices by employing the anti-drift pattern and providing explicit control over the timer's lifecycle (Start, Stop, Pause/Resume).
+![C++](https://img.shields.io/badge/C%2B%2B-11%2F14%2F17-blue.svg)
+![Boost](https://img.shields.io/badge/Boost-1.70%2B-orange.svg)
+![License](https://img.shields.io/badge/license-MIT-green.svg)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
+
+The `PeriodicExecutor` is a C++ include-only class that implements an accurate, asynchronous periodic function scheduler using the **Boost.Asio** library. This implementation adheres to best practices by employing the anti-drift pattern and providing explicit control over the timer's lifecycle (Start, Stop, Pause/Resume).
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Implementation Details](#implementation-details)
+- [Build Instructions](#build-instructions)
+- [Usage Example](#usage-example)
+- [License](#license)
 
 ## Features
 
-* **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to ensure intervals are consistent and prevent cumulative timing errors, regardless of handler execution time.
-* **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, ensuring the timer is non-blocking and efficient.
-* **Explicit Control:** Provides public methods (`start()`, `stop()`, and `pause_resume()`) for managing the periodic task externally.
-* **Graceful Shutdown:** Utilizes the timer's `cancel()` function and checks for the `boost::asio::error::operation_aborted` status to ensure clean termination.
+- **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to ensure intervals are consistent and prevent cumulative timing errors, regardless of handler execution time.
+- **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, ensuring the timer is non-blocking and efficient.
+- **Explicit Control:** Provides public methods (`start()`, `stop()`, and `pause_resume()`) for managing the periodic task externally.
+- **Graceful Shutdown:** Utilizes the timer's `cancel()` function and checks for the `boost::asio::error::operation_aborted` status to ensure clean termination.
 
-## Dependencies
+## Requirements
 
-* **Boost:** Specifically, the **Boost.Asio** library.
-* **C++ Standard Library:** Requires C++11 or later for `std::chrono` and `std::thread`.
+- **Boost:** Specifically, the **Boost.Asio** library.
+- **C++ Standard Library:** Requires C++11 or later for `std::chrono` and `std::thread`.
 
 ## Implementation Details
 
@@ -21,9 +35,9 @@ The core functionality of the `PeriodicExecutor` is based on three Boost.Asio pr
 1. **`io_context`:** The timer's work is dispatched by the `io_context`. The execution only begins when a thread calls `io_context.run()`.
 2. **State Management:** The internal `is_running_` and `is_paused_` flags, protected by `std::atomic`, are used in conjunction with `timer_.cancel()` to manage the external control operations.
 3. **Control Flow:**
-      * **Stop/Pause:** Calling `stop()` or `pause()` issues `timer_.cancel()`. The periodic `handler` detects the resulting `operation_aborted` error code.
-      * If `stop()` was called, the handler sees the cancellation and does *not* reschedule, allowing the `io_context::run()` to return.
-      * If `pause()` was called, the handler sees the cancellation and checks the `is_paused_` flag, which also prevents rescheduling until `resume` is called.
+      - **Stop/Pause:** Calling `stop()` or `pause()` issues `timer_.cancel()`. The periodic `handler` detects the resulting `operation_aborted` error code.
+      - If `stop()` was called, the handler sees the cancellation and does *not* reschedule, allowing the `io_context::run()` to return.
+      - If `pause()` was called, the handler sees the cancellation and checks the `is_paused_` flag, which also prevents rescheduling until `resume` is called.
 
 ## Build Instructions
 
@@ -154,3 +168,7 @@ int main() {
     return 0;
 }
 ```
+
+## License
+
+MIT License, Copyright (c) 2025 Joerg Wallmersperger, see the [LICENSE](LICENSE) for full license details.
