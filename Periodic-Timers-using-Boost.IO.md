@@ -1,6 +1,6 @@
 # **Guide to Implementing Robust Periodic Timers with Boost.Asio**
 
-### **Executive Summary: The Asynchronous Paradigm for Periodic Tasks**
+## **Executive Summary: The Asynchronous Paradigm for Periodic Tasks**
 
 This report provides a comprehensive guide to implementing a robust, periodic function-calling mechanism using the Boost.Asio library. The most effective solution leverages Boost.Asio's asynchronous, event-driven model rather than a simple thread-sleep loop, which can be inefficient and prone to timing inaccuracies. The core components of this solution are the boost::asio::io\_context (the event loop) and a waitable timer object, with a strong preference for boost::asio::steady\_timer due to its reliance on a monotonic clock.
 
@@ -24,7 +24,7 @@ The event loop continues to run as long as there is "work" to do. An asynchronou
 
 #### **A Detailed Look at Waitable Timers**
 
-Boost.Asio provides a family of waitable timer objects that can be used to perform blocking or asynchronous waits for a specified duration.7 These timers are always in one of two states: "expired" or "not expired." If an async\_wait() call is made on an already-expired timer, the associated completion handler will be invoked immediately. 
+Boost.Asio provides a family of waitable timer objects that can be used to perform blocking or asynchronous waits for a specified duration.7 These timers are always in one of two states: "expired" or "not expired." If an async\_wait() call is made on an already-expired timer, the associated completion handler will be invoked immediately.
 While the library offers several typedefs, deadline\_timer and steady\_timer are the most commonly used. Both timers share a common set of member functions, including async\_wait() to start an asynchronous wait, expires\_at() or expires\_after() to set the expiry time, and cancel() to terminate a pending wait operation.7
 
 #### **The Crucial Distinction: steady\_timer vs. deadline\_timer**
@@ -104,7 +104,6 @@ boost::asio::error::operation\_aborted.7 This error code acts as a signal to the
 
 This pattern, using a combination of the cancel() function and an internal state flag, allows for a robust and clean implementation of start, stop, and pause functionality.
 
-
 ### **Chapter 6: Conclusion and Expert Recommendations**
 
 The analysis confirms that the Boost.Asio library provides a robust and powerful mechanism for implementing periodic function calls in C++. The most effective approach leverages the library's asynchronous model rather than simple blocking loops, resulting in a more efficient and responsive application.
@@ -136,4 +135,4 @@ By following these recommendations, a developer can build a high-performance, re
     [https://think-async.com/Asio/boost\_asio\_1\_16\_1/doc/html/boost\_asio/reference/basic\_deadline\_timer.html](https://think-async.com/Asio/boost_asio_1_16_1/doc/html/boost_asio/reference/basic_deadline_timer.html)  
 11. Timer.3 \- Binding arguments to a handler, [https://home.cc.umanitoba.ca/\~psgendb/birchhomedir/admin/launchers/biolegato.app/Contents/Resources/public\_html/doc/BIRCH/doc/local/pkg/CASAVA\_v1.8.2-build/opt/bootstrap/build/boost\_1\_44\_0/doc/html/boost\_asio/tutorial/tuttimer3.html](https://home.cc.umanitoba.ca/~psgendb/birchhomedir/admin/launchers/biolegato.app/Contents/Resources/public_html/doc/BIRCH/doc/local/pkg/CASAVA_v1.8.2-build/opt/bootstrap/build/boost_1_44_0/doc/html/boost_asio/tutorial/tuttimer3.html)  
 12. Per-Operation Cancellation \- Boost, [https://www.boost.org/doc/libs/1\_89\_0/libs/mqtt5/doc/html/mqtt5/asio\_compliance/per\_op\_cancellation.html](https://www.boost.org/doc/libs/1_89_0/libs/mqtt5/doc/html/mqtt5/asio_compliance/per_op_cancellation.html)  
-13. Cancellation \- Asio C++ Library,, [https://think-async.com/Asio/boost\_asio\_1\_30\_2/doc/html/boost\_asio/overview/model/cancellation.html](https://think-async.com/Asio/boost_asio_1_30_2/doc/html/boost_asio/overview/model/cancellation.html)
+13. Cancellation \- Asio C++ Library, [https://think-async.com/Asio/boost\_asio\_1\_30\_2/doc/html/boost\_asio/overview/model/cancellation.html](https://think-async.com/Asio/boost_asio_1_30_2/doc/html/boost_asio/overview/model/cancellation.html)
