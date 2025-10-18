@@ -202,7 +202,7 @@ bool PeriodicExecutor<Executor>::start(std::chrono::milliseconds interval, std::
     is_running_ = true;
     is_paused_ = false;
 
-    timer_.expires_from_now(interval_);
+    timer_.expires_after(interval_);
     // Use bind_executor with the strand to ensure the handler is run serially.
     timer_.async_wait(boost::asio::bind_executor(strand_, std::bind(&PeriodicExecutor::handle_wait, this, std::placeholders::_1)));
 
@@ -231,10 +231,7 @@ void PeriodicExecutor<Executor>::stop() {
     if (!is_running_) {
         return;
     }
-
-    boost::system::error_code ec;
-    timer_.cancel(ec);
-
+    timer_.cancel();
     work_guard_.reset();
     io_context_.stop();
 
@@ -260,8 +257,7 @@ void PeriodicExecutor<Executor>::pause() {
     if (!is_running_ || is_paused_) {
         return;
     }
-    boost::system::error_code ec;
-    timer_.cancel(ec);
+    timer_.cancel();
     is_paused_ = true;
 }
 
@@ -279,7 +275,7 @@ void PeriodicExecutor<Executor>::resume() {
         return;
     }
     is_paused_ = false;
-    timer_.expires_from_now(interval_);
+    timer_.expires_after(interval_);
     timer_.async_wait(boost::asio::bind_executor(strand_, std::bind(&PeriodicExecutor::handle_wait, this, std::placeholders::_1)));
 }
 
