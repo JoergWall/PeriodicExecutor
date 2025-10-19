@@ -4,6 +4,7 @@
 #include <boost/thread.hpp>
 #include <functional>
 #include <chrono>
+#include <iostream>
 
 /**
  * @file
@@ -206,14 +207,24 @@ bool PeriodicExecutor<Executor>::start(std::chrono::milliseconds interval, std::
     // Use bind_executor with the strand to ensure the handler is run serially.
     timer_.async_wait(boost::asio::bind_executor(strand_, std::bind(&PeriodicExecutor::handle_wait, this, std::placeholders::_1)));
 
+   
     // Launch a new thread to run the io_context.
     // The lambda function captures 'this' to correctly call io_context_.run().
     worker_thread_ = boost::thread([this]() {
-        io_context_.run();
+        try {
+            io_context_.run();
+        } catch (const std::exception& ex) {
+            std::cerr << "Exception caught in io_context.run(): " << ex.what() << std::endl;
+            // Optional: log or handle recovery
+        } catch (...) {
+            std::cerr << "Unknown exception caught in io_context.run()" << std::endl;
+            // Optional: fallback handling
+        }
     });
 
     return true;
 }
+
 
 /**
  * @fn PeriodicExecutor::stop()

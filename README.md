@@ -62,7 +62,7 @@ The following code demonstrates the periodic execution of functions in different
 #include <atomic>
 
 /**
- * @file main.cpp
+ * @file examples/example_PE01.cpp
  * @brief Example usage file demonstrating the concurrent execution of periodic tasks.
  *
  * @details This file shows how to instantiate and use the `\`PeriodicExecutor\``
