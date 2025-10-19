@@ -231,14 +231,27 @@ computes instantaneous and cumulative errors and stores them.
     std::cout << "----------------------------------------" << std::endl;
 
     // Output all timing data to a single CSV file
-    std::ofstream timing_csv_file("timing_data.csv");
-    if (timing_csv_file.is_open()) {
-        timing_csv_file << "InstantaneousJitter,CumulativePhaseError\n"; // Header
-        for (const auto& data_pair : timing_data) {
-            timing_csv_file << data_pair.first << "," << data_pair.second << "\n";
+    try {
+        std::ofstream timing_csv_file("timing_data.csv", std::ios::out | std::ios::trunc);
+        timing_csv_file.exceptions(std::ofstream::failbit | std::ofstream::badbit);
+        timing_csv_file << "InstantaneousJitter,CumulativePhaseError\n";
+        for (const auto& entry : timing_data) {
+            timing_csv_file << entry.first << "," << entry.second << "\n";
         }
         timing_csv_file.close();
+    } catch (const std::ofstream::failure& e) {
+        std::cerr << "Failed to write timing_data.csv: " << e.what() << '\n';
+        std::cerr << "Falling back to stdout CSV output.\n";
+        try {
+            std::cout << "InstantaneousJitter,CumulativePhaseError\n";
+            for (const auto& entry : timing_data) {
+                std::cout << entry.first << "," << entry.second << '\n';
+            }
+        } catch (...) {
+            std::cerr << "Fallback stdout write also failed. Timing data lost.\n";
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Unexpected error while writing CSV: " << e.what() << '\n';
     }
-
     return 0;
 }
