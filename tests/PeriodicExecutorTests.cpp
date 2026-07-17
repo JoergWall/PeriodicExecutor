@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <stdexcept>
 
 using namespace std::chrono_literals;
 
@@ -42,7 +43,7 @@ struct ExecutorFixture {
 BOOST_FIXTURE_TEST_SUITE(PeriodicExecutorTests, ExecutorFixture)
 
 BOOST_AUTO_TEST_CASE(Test_01_StartAndStop) {
-    PeriodicExecutor<> executor;
+    PeriodicExecutor executor;
     std::atomic<int> count{0};
     
     // Task with a relatively long interval
@@ -73,7 +74,7 @@ BOOST_AUTO_TEST_CASE(Test_01_StartAndStop) {
  * range based on the run duration and the set interval.
  */
 BOOST_AUTO_TEST_CASE(Test_02_TimingAccuracy) {
-    PeriodicExecutor<> executor;
+    PeriodicExecutor executor;
     std::atomic<int> count{0};
     
     const auto interval = 100ms;
@@ -108,7 +109,7 @@ BOOST_AUTO_TEST_CASE(Test_02_TimingAccuracy) {
  * restarts the timing loop correctly.
  */
 BOOST_AUTO_TEST_CASE(Test_03_PauseResumeFunctionality) {
-    PeriodicExecutor<> executor;
+    PeriodicExecutor executor;
     std::atomic<int> count{0};
     
     const auto interval = 100ms;
@@ -155,7 +156,7 @@ BOOST_AUTO_TEST_CASE(Test_03_PauseResumeFunctionality) {
  * the application or lead to inconsistent state.
  */
 BOOST_AUTO_TEST_CASE(Test_04_IdempotencyAndSafety) {
-    PeriodicExecutor<> executor;
+    PeriodicExecutor executor;
     std::atomic<int> count{0};
     
     // Start sequence
@@ -186,6 +187,91 @@ BOOST_AUTO_TEST_CASE(Test_04_IdempotencyAndSafety) {
     const int count_after_stop = count.load();
     std::this_thread::sleep_for(200ms);
     BOOST_CHECK_EQUAL(count.load(), count_after_stop);
+}
+
+/**
+ * @brief Tests that an instance can be restarted after being stopped.
+ *
+ * @details Verifies the lifecycle fix: after stop() the internal io_context is
+ * restarted on the next start(), so the same object schedules work again.
+ */
+BOOST_AUTO_TEST_CASE(Test_05_RestartAfterStop) {
+    PeriodicExecutor executor;
+    std::atomic<int> count{0};
+
+    executor.start(100ms, [&]() { count++; });
+    std::this_thread::sleep_for(300ms + TIME_TOLERANCE);
+    executor.stop();
+
+    const int count_after_first_run = count.load();
+    BOOST_CHECK_GE(count_after_first_run, 1);
+
+    // Restart the same instance.
+    count.store(0);
+    BOOST_CHECK_EQUAL(executor.start(100ms, [&]() { count++; }), true);
+    BOOST_CHECK_EQUAL(executor.is_running(), true);
+    std::this_thread::sleep_for(300ms + TIME_TOLERANCE);
+    executor.stop();
+
+    BOOST_CHECK_GE(count.load(), 1);
+    BOOST_TEST_MESSAGE("Test 05 finished. Second-run count: " << count.load());
+}
+
+/**
+ * @brief Tests that an exception thrown by the callback does not stop the loop.
+ *
+ * @details Verifies callback isolation: a throwing callback is caught, routed to the
+ * installed error handler, and the periodic loop keeps firing.
+ */
+BOOST_AUTO_TEST_CASE(Test_06_CallbackExceptionIsolation) {
+    PeriodicExecutor executor;
+    std::atomic<int> count{0};
+    std::atomic<int> errors{0};
+
+    executor.set_error_handler([&](std::exception_ptr) { errors++; });
+
+    executor.start(100ms, [&]() {
+        count++;
+        throw std::runtime_error("boom");
+    });
+
+    std::this_thread::sleep_for(350ms + TIME_TOLERANCE);
+    executor.stop();
+
+    // The loop must have survived the exceptions and fired multiple times.
+    BOOST_CHECK_GE(count.load(), 2);
+    BOOST_CHECK_EQUAL(errors.load(), count.load());
+    BOOST_TEST_MESSAGE("Test 06 finished. Executions: " << count.load()
+                       << ", errors reported: " << errors.load());
+}
+
+/**
+ * @brief Tests that stop() can be safely called from within the callback.
+ *
+ * @details Verifies the self-join guard: calling stop() from the worker thread must
+ * not deadlock or terminate. The loop must halt after the callback returns, and the
+ * destructor must still join the worker cleanly.
+ */
+BOOST_AUTO_TEST_CASE(Test_07_StopFromCallback) {
+    std::atomic<int> count{0};
+    {
+        PeriodicExecutor executor;
+        executor.start(100ms, [&]() {
+            if (++count == 2) {
+                executor.stop();  // Self-stop from the worker thread.
+            }
+        });
+
+        // Give the loop time to reach the self-stop and settle.
+        std::this_thread::sleep_for(500ms + TIME_TOLERANCE);
+
+        // It should have stopped itself at the 2nd firing and not run again.
+        BOOST_CHECK_EQUAL(count.load(), 2);
+        BOOST_CHECK_EQUAL(executor.is_running(), false);
+        // Destructor runs here and must join the deferred worker without terminating.
+    }
+    BOOST_CHECK_EQUAL(count.load(), 2);
+    BOOST_TEST_MESSAGE("Test 07 finished. Final count: " << count.load());
 }
 
 BOOST_AUTO_TEST_SUITE_END() // PeriodicExecutorTests

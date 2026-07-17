@@ -1,11 +1,11 @@
 # PeriodicExecutor - Periodic Timer using Boost.Asio for C++
 
-![C++](https://img.shields.io/badge/C%2B%2B-11%2F14%2F17-blue.svg)
+![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
 ![Boost](https://img.shields.io/badge/Boost-1.70%2B-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 
-The `PeriodicExecutor` is a C++ include-only class that implements an accurate, asynchronous periodic function scheduler using the **Boost.Asio** library. This implementation adheres to best practices by employing the anti-drift pattern and providing explicit control over the timer's lifecycle (Start, Stop, Pause/Resume).
+The `PeriodicExecutor` is a C++ include-only class that implements an accurate, asynchronous periodic function scheduler using the **Boost.Asio** library. This implementation adheres to best practices by employing the anti-drift pattern and providing explicit, thread-safe control over the timer's lifecycle (start, stop, pause, resume). Each instance is self-contained: it owns a private `io_context` driven by a single dedicated worker thread, so scheduling a task never blocks the caller.
 
 ## Table of Contents
 
@@ -18,26 +18,38 @@ The `PeriodicExecutor` is a C++ include-only class that implements an accurate, 
 
 ## Features
 
-- **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to ensure intervals are consistent and prevent cumulative timing errors, regardless of handler execution time.
-- **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, ensuring the timer is non-blocking and efficient.
-- **Explicit Control:** Provides public methods (`start()`, `stop()`, and `pause_resume()`) for managing the periodic task externally.
-- **Graceful Shutdown:** Utilizes the timer's `cancel()` function and checks for the `boost::asio::error::operation_aborted` status to ensure clean termination.
+- **Anti-Drift Mechanism:** Uses `boost::asio::steady_timer` and relative rescheduling (`timer.expires_at(timer.expiry() + interval)`) to keep intervals consistent and prevent cumulative timing errors, regardless of handler execution time. If a callback overruns its interval, the schedule is re-anchored to *now* to avoid a burst of catch-up firings.
+- **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, so the timer is non-blocking and efficient.
+- **Thread-Safe Control:** `start()`, `stop()`, `pause()`, and `resume()` may be called from any thread. Lifecycle transitions are serialized with a mutex; all timer mutations are marshalled onto a `strand` so the `steady_timer` is only ever touched from the worker thread.
+- **Callback Isolation:** An exception escaping the user callback is caught, forwarded to an optional error handler, and the periodic loop keeps running instead of silently dying.
+- **Restartable:** After `stop()`, the same instance can be started again.
+- **Graceful Shutdown:** Releases the work guard, stops the `io_context`, and joins the worker thread for deterministic cleanup (also invoked automatically by the destructor).
 
 ## Requirements
 
-- **Boost:** Specifically, the **Boost.Asio** library.
-- **C++ Standard Library:** Requires C++11 or later for `std::chrono` and `std::thread`.
+- **Boost:** Specifically, the **Boost.Asio** library (header-only; no separate Boost link is required by the header itself).
+- **C++ Standard Library:** Requires **C++17** or later (uses `std::optional`, `std::chrono`, `std::thread`, `std::atomic`).
+
+## API
+
+| Method | Description |
+| :--- | :--- |
+| `bool start(std::chrono::milliseconds interval, std::function<void()> callback)` | Starts the loop; first call fires one interval later. Returns `false` if already running, the interval is non-positive, or the callback is empty. |
+| `void stop()` | Stops and joins the worker thread. Idempotent. Safe to call from inside the callback — the join is deferred (see below) rather than deadlocking. |
+| `void pause()` / `void resume()` | Suspend / restart the loop without tearing down the worker thread. Idempotent. |
+| `void set_error_handler(std::function<void(std::exception_ptr)>)` | Installs a handler for callback/run-loop exceptions. Set it before `start()`. |
+| `bool is_running() const` / `bool is_paused() const` | Observe the current state. |
 
 ## Implementation Details
 
-The core functionality of the `PeriodicExecutor` is based on three Boost.Asio principles:
+The core functionality of the `PeriodicExecutor` is based on a few Boost.Asio principles:
 
-1. **`io_context`:** The timer's work is dispatched by the `io_context`. The execution only begins when a thread calls `io_context.run()`.
-2. **State Management:** The internal `is_running_` and `is_paused_` flags, protected by `std::atomic`, are used in conjunction with `timer_.cancel()` to manage the external control operations.
+1. **`io_context`:** The timer's work is dispatched by the internal `io_context`. Execution runs on a dedicated worker thread that calls `io_context::run()`. A `work_guard` keeps `run()` alive across pauses; `start()` calls `io_context::restart()` so the instance can be reused after `stop()`.
+2. **State Management:** The observable `running_` and `paused_` flags are `std::atomic<bool>`. A `std::mutex` serializes the lifecycle methods against each other, and a `strand` serializes every access to the timer.
 3. **Control Flow:**
-      - **Stop/Pause:** Calling `stop()` or `pause()` issues `timer_.cancel()`. The periodic `handler` detects the resulting `operation_aborted` error code.
-      - If `stop()` was called, the handler sees the cancellation and does *not* reschedule, allowing the `io_context::run()` to return.
-      - If `pause()` was called, the handler sees the cancellation and checks the `is_paused_` flag, which also prevents rescheduling until `resume` is called.
+      - **Stop:** `stop()` releases the work guard and calls `io_context::stop()`, then joins the worker thread. The join happens outside the lock so a concurrent control call cannot deadlock. If `stop()` is called from *within* the callback (i.e. on the worker thread itself), the self-join is detected and skipped — shutdown proceeds and the join is deferred to the destructor or a later `stop()` from another thread, so the loop halts once the current callback returns without deadlocking or terminating.
+      - **Pause:** `pause()` sets `paused_` and `post`s `timer_.cancel()` onto the strand. The handler sees `operation_aborted` (or the `paused_` flag) and does *not* reschedule.
+      - **Resume:** `resume()` clears `paused_` and `post`s a fresh `async_wait` onto the strand, re-arming the loop one interval from now.
 
 ## Build Instructions
 
@@ -112,11 +124,11 @@ void func_b(std::atomic<int>& counter) {
  * @return `0` on successful execution.
  */
 int main() {
-    // Create three separate PeriodicExecutor instances. Since the class is templated
-    // with a default type, we use the simple syntax `PeriodicExecutor<>`.
-    PeriodicExecutor<> executor_a;
-    PeriodicExecutor<> executor_b;
-    PeriodicExecutor<> executor_c;
+    // Create three separate PeriodicExecutor instances. The class is self-contained;
+    // each instance owns its own worker thread and Boost.Asio io_context.
+    PeriodicExecutor executor_a;
+    PeriodicExecutor executor_b;
+    PeriodicExecutor executor_c;
     
     // Use atomic counters (`std::atomic`) for thread-safe counting, as each
     // executor will run its task on a different background thread.

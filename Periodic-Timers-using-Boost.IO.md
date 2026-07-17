@@ -67,6 +67,10 @@ The implementation follows a clear, self-sustaining loop:
 
 This cycle ensures that even if a handler takes longer to run than the specified interval, the next timer will still fire at the correct, scheduled time, maintaining a consistent rhythm and preventing cumulative drift.
 
+##### **Handling Handler Overruns**
+
+The "post-to-self" pattern has one edge case worth handling explicitly. If a single handler execution takes *longer* than the interval, then `timer.expiry() + interval` may already lie in the past. An already-expired timer completes its `async_wait` immediately, so a series of slow handlers can trigger a burst of back-to-back "catch-up" firings until the schedule is caught up — the opposite of the smooth cadence we want. A robust implementation therefore clamps the next expiry: if `expiry() + interval` is earlier than the current `steady_clock::now()`, it re-anchors the schedule to `now() + interval`. This trades perfect long-run phase alignment (which is unrecoverable once the handler cannot keep up) for a bounded, predictable interval. The reference `PeriodicExecutor` in this repository applies exactly this clamp.
+
 #### **Managing State and Passing Parameters**
 
 To implement the "post-to-self" pattern, the completion handler must have access to the timer object and any other required state. Modern C++ offers elegant solutions for this. A lambda function with captures provides a clean and type-safe way to store state between invocations, as shown in numerous examples.3 Older versions of the library relied on
@@ -90,6 +94,14 @@ A summary of the core object thread safety rules is provided below for clarity:
 | io\_context | Safe for concurrent use by multiple threads, provided each thread calls run(). | The io\_context is a work queue with internal synchronization. Its purpose is to safely distribute work to a pool of threads. |
 | steady\_timer / deadline\_timer | Unsafe for concurrent use of a single object. | Timer objects are mutable I/O objects. Concurrent modification or access would result in a race condition. |
 
+#### **The Strand Solution for Control From Other Threads**
+
+The timer-is-not-thread-safe rule has a direct practical consequence for a control class such as `PeriodicExecutor`. Methods like `pause()` and `resume()` are naturally called from a thread *other* than the worker thread running `io_context::run()`. If those methods were to call `timer_.cancel()` or `timer_.expires_after()` directly, they would mutate the timer concurrently with the handler that re-arms it — a data race.
+
+The idiomatic fix is a `boost::asio::strand`. A strand is an executor that guarantees the handlers dispatched through it never run concurrently. The class binds every `async_wait` completion to the strand, and control methods do not touch the timer themselves — instead they `boost::asio::post()` a small lambda (`timer_.cancel()`, or a fresh `expires_after()` + `async_wait()`) onto the same strand. Because all timer access is now funnelled through one strand, it is automatically serialized with the completion handler, and no explicit mutex around the timer is required. A separate mutex is still used, but only to serialize the higher-level lifecycle transitions (`start`/`stop`) against one another; the atomic state flags let the handler observe pause/stop without locking.
+
+An exception thrown by the user's callback deserves the same care: if it propagates out of the handler it escapes `io_context::run()`, terminating the worker thread and silently killing the schedule. A resilient class wraps the callback invocation in a `try/catch`, forwards the captured exception to an optional error handler, and then re-arms the timer as usual.
+
 ### **Chapter 5: Implementing Control Functions: Start, Stop, and Pause**
 
 The design of a reusable timer class should include explicit control over its state. The core mechanism for stopping or pausing an asynchronous timer in Boost.Asio is the cancel() member function.7 When
@@ -100,9 +112,9 @@ boost::asio::error::operation\_aborted.7 This error code acts as a signal to the
 
 * **Start:** A start() function initializes the timer's first asynchronous wait, setting its expiry time and kicking off the periodic cycle.  
 * **Stop:** A stop() function simply calls timer\_.cancel(). The next time the timer's handler is invoked, it will detect the operation\_aborted error and will not reschedule the timer. This allows the io\_context to eventually run out of work and shut down gracefully.2  
-* **Pause/Resume:** A pause() or pause\_resume() function can manage the state of the timer. Calling pause() can be implemented by setting a flag and then canceling the timer. The handler will see the cancellation and a check on the flag will prevent it from re-scheduling the timer. A resume() function then resets the flag and explicitly calls a new async\_wait() to restart the process.
+* **Pause/Resume:** Separate pause() and resume() functions manage the timer state. pause() sets a flag and cancels the timer; the handler sees the cancellation (and the flag) and does not re-schedule. resume() clears the flag and posts a fresh async\_wait() to restart the process. As noted in Chapter 4, when these calls originate on a different thread than the worker, the cancel/re-arm work must be `post`ed onto the strand rather than performed inline.
 
-This pattern, using a combination of the cancel() function and an internal state flag, allows for a robust and clean implementation of start, stop, and pause functionality.
+This pattern, using a combination of the cancel() function and an internal state flag, allows for a robust and clean implementation of start, stop, and pause/resume functionality. A production-grade class additionally makes itself **restartable** — after stop() it calls `io_context::restart()` on the next start() so the same instance can be reused — and **exception-safe**, containing any exception thrown by the user callback so a single failure does not silently terminate the periodic loop.
 
 ### **Chapter 6: Conclusion and Expert Recommendations**
 
@@ -115,7 +127,7 @@ The key findings and recommendations are:
 * **Implement the Anti-Drift Pattern:** The canonical "post-to-self" pattern is essential for accurate, long-running periodic timers. The completion handler must calculate the next expiry time relative to the *previous* expiry to correct for any execution latency . The pattern is implemented by calling timer.expires\_at(timer.expiry() \+ interval) and then starting a new async\_wait.  
 * **Adhere to Thread Safety Guidelines:** While a single io\_context instance is thread-safe for concurrent use by multiple threads calling run(), the timer objects themselves are not. Do not perform concurrent operations on a single timer instance from different threads without external synchronization .  
 * **Plan for Graceful Shutdown:** Design the completion handler to check for the boost::asio::error::operation\_aborted error code.7 This allows the application to cleanly cancel a pending timer and stop the event loop without requiring a forceful termination.  
-* **Implement Explicit Control:** For production-ready code, encapsulate the timer logic within a class and provide explicit start(), stop(), and pause\_resume() functions. The stop() and pause\_resume() functions should use the timer's cancel() method to signal the event loop, and the handler should manage the state of the timer via an internal flag.
+* **Implement Explicit Control:** For production-ready code, encapsulate the timer logic within a class and provide explicit start(), stop(), pause(), and resume() functions. These should use the timer's cancel() method to signal the event loop, and the handler should manage the state of the timer via an internal flag. When control methods may be called from other threads, marshal every timer operation onto a strand (see Chapter 4), contain callback exceptions, and call io\_context::restart() in start() so the instance can be reused after stop().
 
 By following these recommendations, a developer can build a high-performance, resilient, and accurate periodic task scheduler that is well-suited for a wide range of C++ applications.
 

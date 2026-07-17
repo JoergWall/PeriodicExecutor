@@ -23,6 +23,7 @@ saves raw per-iteration data to timing_data.csv.
 */
 #include "PeriodicExecutor.hpp"
 #include <iostream>
+#include <thread>
 #include <chrono>
 #include <atomic>
 #include <vector>
@@ -50,7 +51,7 @@ int main() {
 This is a template instantiation of the class PeriodicExecutor. The concrete behavior
 (threading, timer implementation) is defined in PeriodicExecutor.hpp.
 */
-    PeriodicExecutor<> executor;
+    PeriodicExecutor executor;
 /**
 @var counter
 @brief Atomic counter of how many times the callback has been invoked.
@@ -160,7 +161,7 @@ computes instantaneous and cumulative errors and stores them.
         }
     });
     // Run for 10 seconds
-    boost::this_thread::sleep_for(boost::chrono::seconds(10));
+    std::this_thread::sleep_for(std::chrono::seconds(10));
     executor.stop();
     // Extract data for statistics
     int measured_executions = counter.load();

@@ -74,6 +74,7 @@ target_include_directories(PeriodicExecutor INTERFACE
 )
 target_link_libraries(PeriodicExecutor INTERFACE
     ${Boost_LIBRARIES}
+    Threads::Threads
 )
 
 

@@ -55,11 +55,11 @@ void func_b(std::atomic<int>& counter) {
  * @return `0` on successful execution.
  */
 int main() {
-    // Create three separate PeriodicExecutor instances. Since the class is templated
-    // with a default type, we use the simple syntax `PeriodicExecutor<>`.
-    PeriodicExecutor<> executor_a;
-    PeriodicExecutor<> executor_b;
-    PeriodicExecutor<> executor_c;
+    // Create three separate PeriodicExecutor instances. The class is self-contained;
+    // each instance owns its own worker thread and Boost.Asio io_context.
+    PeriodicExecutor executor_a;
+    PeriodicExecutor executor_b;
+    PeriodicExecutor executor_c;
     
     // Use atomic counters (`std::atomic`) for thread-safe counting, as each
     // executor will run its task on a different background thread.
