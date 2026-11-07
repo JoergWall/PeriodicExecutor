@@ -148,9 +148,9 @@ Because `run()` returns as soon as work runs dry, a class that supports `pause()
 
 ### The Control Surface
 
-* **Start.** `start()` validates its arguments, stores the callback and interval, sets the state flags, calls `io_context::restart()` to make the context reusable after a previous `stop()`, creates the work guard, arms the first wait one interval out, and spawns the worker thread that runs `io_context::run()` (itself wrapped in `try/catch` so a stray exception is reported, not fatal).
+* **Start.** `start()` validates its arguments. If a previous `stop()` from inside the callback (a *self-stop*) left the worker thread joinable, `start()` first joins (reaps) it outside the lock — a `start()` issued from inside the callback itself, or one racing another thread's join, returns `false` instead. It then calls `io_context::restart()` and *drains* any handlers the previous generation left queued (a `pause()`'s pending cancel, a timer completion that was already ready when `stop()` halted the loop — either would otherwise poison the new generation), stores the callback and interval, sets the state flags, creates the work guard, arms the first wait one interval out, and spawns the worker thread that runs `io_context::run()` (itself wrapped in `try/catch` so a stray exception is reported, not fatal).
 
-* **Stop.** `stop()` does **not** call `timer_.cancel()`. With a work guard held, cancelling the timer alone would not end the loop — the guard would keep `run()` blocked. Instead `stop()` releases the work guard and calls `io_context::stop()`, which returns from `run()` promptly even if work is queued. It then joins the worker. `stop()` is idempotent and **safe to call from within the callback**: a thread cannot join itself, so in that case the join is deferred to the destructor or to a later `stop()` from another thread, and the loop halts as soon as the current callback returns.
+* **Stop.** `stop()` does **not** call `timer_.cancel()`. With a work guard held, cancelling the timer alone would not end the loop — the guard would keep `run()` blocked. Instead `stop()` releases the work guard and calls `io_context::stop()`, which returns from `run()` promptly even if work is queued. It then joins the worker. `stop()` is idempotent and **safe to call from within the callback**: a thread cannot join itself, so in that case the join is deferred to the destructor, to a later `stop()`, or to the next `start()` from another thread, and the loop halts as soon as the current callback returns. While a `stop()` is joining the worker, a concurrent `start()` returns `false` rather than restarting the loop under the old `run()`'s feet.
 
 * **Pause / Resume.** `pause()` sets the paused flag and `post`s `timer_.cancel()` onto the strand; the handler sees the cancellation (and the flag) and does not re-arm. `resume()` clears the flag and `post`s a fresh `expires_after(interval)` + `async_wait()` onto the strand, restarting the cadence one interval from now. Routing both through the strand is what keeps them free of the data race described in Chapter 4.
 
@@ -159,16 +159,35 @@ Sketch of the lifecycle methods (full source in [`include/PeriodicExecutor.hpp`]
 ```cpp
 bool PeriodicExecutor::start(std::chrono::milliseconds interval,
                              std::function<void()> callback) {
-    std::lock_guard<std::mutex> lock(control_mutex_);
-    if (running_.load(std::memory_order_relaxed) || interval.count() <= 0 || !callback)
+    std::unique_lock<std::mutex> lock(control_mutex_);
+    if (running_.load(std::memory_order_relaxed) || joining_ ||
+        interval.count() <= 0 || !callback)
         return false;
+
+    // A prior self-stop left the worker joinable: assigning a new thread to a
+    // joinable std::thread would call std::terminate, so reap it first. The join
+    // happens OUTSIDE the lock; joining_ makes a competing start() return false
+    // instead of racing the join.
+    if (worker_thread_.joinable()) {
+        if (worker_thread_.get_id() == std::this_thread::get_id())
+            return false;            // cannot restart from inside the callback
+        joining_ = true;
+        std::thread stale = std::move(worker_thread_);
+        lock.unlock();
+        stale.join();
+        lock.lock();
+        joining_ = false;
+    }
+
+    io_context_.restart();            // reusable after a prior stop()
+    io_context_.poll();               // drain handlers the old generation left queued
+    io_context_.restart();            // poll() re-stops the context once it runs dry
 
     callback_ = std::move(callback);
     interval_ = interval;
     paused_.store(false, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
 
-    io_context_.restart();                          // reusable after a prior stop()
     work_guard_.emplace(io_context_.get_executor()); // keep run() alive across pauses
     timer_.expires_after(interval_);
     arm_timer();

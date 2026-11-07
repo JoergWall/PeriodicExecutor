@@ -16,6 +16,26 @@ using namespace std::chrono_literals;
 constexpr std::chrono::milliseconds TIME_TOLERANCE = 50ms;
 
 /**
+ * @brief Polls @p predicate until it returns true or @p deadline expires.
+ *
+ * @details Returns the predicate's final value. Deadline-polling keeps
+ * timing-sensitive assertions robust on slow or loaded CI runners without
+ * inflating the common-case test runtime the way fixed sleeps do.
+ */
+template <typename Pred>
+static bool wait_until(Pred predicate,
+                       std::chrono::milliseconds deadline = std::chrono::seconds(5)) {
+    const auto end = std::chrono::steady_clock::now() + deadline;
+    while (!predicate()) {
+        if (std::chrono::steady_clock::now() >= end) {
+            return predicate();
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    return true;
+}
+
+/**
  * @defgroup TestSuite PeriodicExecutor Unit Tests
  * @brief Test cases for verifying the functionality, timing, and lifecycle of PeriodicExecutor.
  * @{
@@ -272,6 +292,134 @@ BOOST_AUTO_TEST_CASE(Test_07_StopFromCallback) {
     }
     BOOST_CHECK_EQUAL(count.load(), 2);
     BOOST_TEST_MESSAGE("Test 07 finished. Final count: " << count.load());
+}
+
+/**
+ * @brief Tests that an instance can be restarted after a self-stop.
+ *
+ * @details A stop() from inside the callback defers the join and leaves the worker
+ * handle in place. A subsequent start() from another thread must reap that worker
+ * and succeed (this used to call std::terminate). A start() attempted from inside
+ * the callback right after the self-stop cannot join the worker from itself and
+ * must be refused gracefully (return false) instead of crashing.
+ */
+BOOST_AUTO_TEST_CASE(Test_08_RestartAfterSelfStop) {
+    // Atomics are declared before the executor so the destructor's stop()/join
+    // runs while everything the callbacks reference is still alive.
+    std::atomic<int> first_run{0};
+    std::atomic<int> second_run{0};
+    std::atomic<int> restart_inside_result{-1};
+    PeriodicExecutor executor;
+
+    BOOST_REQUIRE(executor.start(100ms, [&]() {
+        if (++first_run == 2) {
+            executor.stop();  // Self-stop from the worker thread; join is deferred.
+            // Restart from inside the callback: must be refused, not terminate.
+            restart_inside_result.store(
+                executor.start(100ms, [&]() { ++second_run; }) ? 1 : 0);
+        }
+    }));
+
+    // Wait (deadline-polled) until the self-stop has happened. first_run can
+    // never exceed 2: after the callback, handle_wait re-checks running_ and
+    // does not re-arm, so the exact-equality checks below are safe.
+    BOOST_REQUIRE(wait_until([&]() { return restart_inside_result.load() != -1; }));
+    BOOST_CHECK_EQUAL(executor.is_running(), false);
+    BOOST_CHECK_EQUAL(first_run.load(), 2);
+    BOOST_CHECK_EQUAL(restart_inside_result.load(), 0);
+
+    // Restart from this (non-worker) thread: start() must join the stale worker
+    // left behind by the self-stop and then succeed.
+    BOOST_CHECK_EQUAL(executor.start(100ms, [&]() { ++second_run; }), true);
+    BOOST_CHECK_EQUAL(executor.is_running(), true);
+
+    BOOST_CHECK(wait_until([&]() { return second_run.load() >= 1; }));
+    executor.stop();
+
+    BOOST_CHECK_GE(second_run.load(), 1);
+    BOOST_TEST_MESSAGE("Test 08 finished. Second-run count: " << second_run.load());
+}
+
+/**
+ * @brief Tests that a restart is not poisoned by handlers queued before stop().
+ *
+ * @details pause() posts timer_.cancel() onto the strand. When pause() and stop()
+ * land while the callback is still executing, that posted cancel never runs in the
+ * old generation (io_context::stop() makes run() return mid-queue) and would
+ * otherwise execute at the head of the NEXT run(), cancelling the fresh wait and
+ * leaving a "running" executor whose callback never fires. start() must drain such
+ * stale handlers before re-arming.
+ */
+BOOST_AUTO_TEST_CASE(Test_09_RestartNotPoisonedByStaleHandlers) {
+    std::atomic<int> first_calls{0};
+    std::atomic<bool> in_callback{false};
+    std::atomic<int> second_calls{0};
+    PeriodicExecutor executor;
+
+    BOOST_REQUIRE(executor.start(50ms, [&]() {
+        ++first_calls;
+        in_callback.store(true);
+        std::this_thread::sleep_for(300ms);  // Keep the strand busy for the window.
+    }));
+
+    // Enter the window: the callback is running, so pause()'s cancel stays queued.
+    BOOST_REQUIRE(wait_until([&]() { return in_callback.load(); }));
+    executor.pause();  // Posts timer_.cancel(); it queues behind the busy callback.
+    executor.stop();   // Stops the context mid-queue; joins once the callback ends.
+    BOOST_CHECK_EQUAL(executor.is_running(), false);
+
+    // Restart: without the drain in start(), the stale cancel would kill the new
+    // pending wait and second_calls would stay 0 despite is_running() == true.
+    BOOST_REQUIRE(executor.start(50ms, [&]() { ++second_calls; }));
+    BOOST_CHECK(wait_until([&]() { return second_calls.load() >= 2; }));
+    executor.stop();
+
+    BOOST_CHECK_GE(second_calls.load(), 2);
+    BOOST_TEST_MESSAGE("Test 09 finished. Second-generation calls: " << second_calls.load());
+}
+
+/**
+ * @brief Tests that start() is refused while another thread's stop() is joining.
+ *
+ * @details stop() joins the worker outside the lock. During that window the old
+ * run() may still be executing its final callback; a start() that slipped through
+ * would call io_context_.restart() concurrently with the unfinished run() and race
+ * on the timer. start() must return false until the join completes, and succeed
+ * afterwards.
+ */
+BOOST_AUTO_TEST_CASE(Test_10_StartRefusedWhileStopJoins) {
+    std::atomic<bool> in_callback{false};
+    std::atomic<bool> release_callback{false};
+    std::atomic<int> second_calls{0};
+    PeriodicExecutor executor;
+
+    BOOST_REQUIRE(executor.start(30ms, [&]() {
+        in_callback.store(true);
+        while (!release_callback.load()) {
+            std::this_thread::sleep_for(1ms);  // Pin the callback until released.
+        }
+    }));
+
+    BOOST_REQUIRE(wait_until([&]() { return in_callback.load(); }));
+
+    // stop() on a second thread blocks in its join until the callback returns.
+    std::thread stopper([&]() { executor.stop(); });
+
+    // Once is_running() flips, stop() has published joining_ under the same lock,
+    // so any start() acquiring the lock afterwards must refuse while the old
+    // worker is still pinned inside its callback.
+    BOOST_REQUIRE(wait_until([&]() { return !executor.is_running(); }));
+    BOOST_CHECK_EQUAL(executor.start(30ms, [&]() { ++second_calls; }), false);
+
+    release_callback.store(true);  // Let the old generation finish.
+    stopper.join();                // stop() completes its join; joining_ clears.
+
+    BOOST_REQUIRE(executor.start(30ms, [&]() { ++second_calls; }));
+    BOOST_CHECK(wait_until([&]() { return second_calls.load() >= 1; }));
+    executor.stop();
+
+    BOOST_CHECK_GE(second_calls.load(), 1);
+    BOOST_TEST_MESSAGE("Test 10 finished. Second-generation calls: " << second_calls.load());
 }
 
 BOOST_AUTO_TEST_SUITE_END() // PeriodicExecutorTests

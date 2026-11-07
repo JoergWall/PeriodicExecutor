@@ -22,7 +22,7 @@ The `PeriodicExecutor` is a C++ include-only class that implements an accurate, 
 - **Asynchronous Operation:** Leverages the `boost::asio::io_context` event loop, so the timer is non-blocking and efficient.
 - **Thread-Safe Control:** `start()`, `stop()`, `pause()`, and `resume()` may be called from any thread. Lifecycle transitions are serialized with a mutex; all timer mutations are marshalled onto a `strand` so the `steady_timer` is only ever touched from the worker thread.
 - **Callback Isolation:** An exception escaping the user callback is caught, forwarded to an optional error handler, and the periodic loop keeps running instead of silently dying.
-- **Restartable:** After `stop()`, the same instance can be started again.
+- **Restartable:** After `stop()`, the same instance can be started again — including after a `stop()` issued from inside the callback (the next `start()` reaps the worker thread left behind by such a self-stop). On restart, handlers left queued by the previous generation are discarded before the timer is re-armed.
 - **Graceful Shutdown:** Releases the work guard, stops the `io_context`, and joins the worker thread for deterministic cleanup (also invoked automatically by the destructor).
 
 ## Requirements
@@ -34,7 +34,7 @@ The `PeriodicExecutor` is a C++ include-only class that implements an accurate, 
 
 | Method | Description |
 | :--- | :--- |
-| `bool start(std::chrono::milliseconds interval, std::function<void()> callback)` | Starts the loop; first call fires one interval later. Returns `false` if already running, the interval is non-positive, or the callback is empty. |
+| `bool start(std::chrono::milliseconds interval, std::function<void()> callback)` | Starts the loop; first call fires one interval later. Returns `false` if already running, the interval is non-positive, the callback is empty, the call is made from inside the callback after a self-stop (the worker cannot join itself), or another thread is concurrently stopping/restarting the executor. |
 | `void stop()` | Stops and joins the worker thread. Idempotent. Safe to call from inside the callback — the join is deferred (see below) rather than deadlocking. |
 | `void pause()` / `void resume()` | Suspend / restart the loop without tearing down the worker thread. Idempotent. |
 | `void set_error_handler(std::function<void(std::exception_ptr)>)` | Installs a handler for callback/run-loop exceptions. Set it before `start()`. |
@@ -44,10 +44,10 @@ The `PeriodicExecutor` is a C++ include-only class that implements an accurate, 
 
 The core functionality of the `PeriodicExecutor` is based on a few Boost.Asio principles:
 
-1. **`io_context`:** The timer's work is dispatched by the internal `io_context`. Execution runs on a dedicated worker thread that calls `io_context::run()`. A `work_guard` keeps `run()` alive across pauses; `start()` calls `io_context::restart()` so the instance can be reused after `stop()`.
+1. **`io_context`:** The timer's work is dispatched by the internal `io_context`. Execution runs on a dedicated worker thread that calls `io_context::run()`. A `work_guard` keeps `run()` alive across pauses; `start()` calls `io_context::restart()` and drains any handlers the previous generation left queued, so the instance can be reused safely after `stop()`.
 2. **State Management:** The observable `running_` and `paused_` flags are `std::atomic<bool>`. A `std::mutex` serializes the lifecycle methods against each other, and a `strand` serializes every access to the timer.
 3. **Control Flow:**
-      - **Stop:** `stop()` releases the work guard and calls `io_context::stop()`, then joins the worker thread. The join happens outside the lock so a concurrent control call cannot deadlock. If `stop()` is called from *within* the callback (i.e. on the worker thread itself), the self-join is detected and skipped — shutdown proceeds and the join is deferred to the destructor or a later `stop()` from another thread, so the loop halts once the current callback returns without deadlocking or terminating.
+      - **Stop:** `stop()` releases the work guard and calls `io_context::stop()`, then joins the worker thread. The join happens outside the lock so a concurrent control call cannot deadlock. If `stop()` is called from *within* the callback (i.e. on the worker thread itself), the self-join is detected and skipped — shutdown proceeds and the join is deferred to the destructor, a later `stop()`, or the next `start()` from another thread, so the loop halts once the current callback returns without deadlocking or terminating. While a `stop()` is joining the worker, a concurrent `start()` returns `false` instead of restarting over the unfinished `run()`.
       - **Pause:** `pause()` sets `paused_` and `post`s `timer_.cancel()` onto the strand. The handler sees `operation_aborted` (or the `paused_` flag) and does *not* reschedule.
       - **Resume:** `resume()` clears `paused_` and `post`s a fresh `async_wait` onto the strand, re-arming the loop one interval from now.
 
